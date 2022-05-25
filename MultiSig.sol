@@ -1,130 +1,204 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.10;
 
+contract MultiSig {
+    // Contract Events
+    event Deposit(address indexed sender, uint256 amount, uint256 balance);
 
-contract MultiSigWallet{
+    event SubmitTransaction(
+        address indexed owner,
+        uint256 indexed txIndex,
+        address indexed to,
+        uint256 value,
+        bytes data
+    );
 
-    event Deposit(address indexed sender, uint amount, uint balance);
+    event ConfirmTransaction(address indexed owner, uint256 indexed txIndex);
+    event RevokeConfirmation(address indexed owner, uint256 indexed txIndex);
+    event ExecuteTransaction(address indexed owner, uint256 indexed txIndex);
 
-    event SubmitTransaction(address indexed owner, uint indexed txIndex, address indexed to, uint value, bytes data);
-
-    event ConfirmTransaction(address indexed owner, uint indexed txIndex);
-    event RevokeConfirmation(address indexed owner, uint indexed txIndex);
-    event ExecuteTransaction(address indexed owner, uint indexed txIndex);
-
+    // Wallet Owners
     address[] public owners;
-    mapping(address=> bool) public isOwner;
-    uint public numConfirmations;
+    // Mapping to check for unique owners
+    mapping(address => bool) public isOwner;
+    // Number of confirmations required for each transaction
+    uint256 public numConfirmations;
+    // Public name of wallet
+    string public name;
 
-    struct Transaction{
+    // Transaction Struct
+
+    struct Transaction {
         address to;
-        uint value;
+        uint256 value;
         bytes data;
         bool executed;
-        uint numConfirmations;
+        uint256 numConfirmations;
+        uint256 txIndex;
+        string descriptionHash;
+        uint256 timestampSubmitted;
+        uint256 timestampExecuted;
     }
 
-    mapping(uint => mapping(address => bool)) public isConfirmed;
+    // Mapping for a transactions confirmations based on the transaction index
 
+    mapping(uint256 => mapping(address => bool)) public isConfirmed;
 
+    // Current transactions
     Transaction[] public transactions;
 
-    constructor(address[] memory _owners, uint _numConfirmationsRequired)  {
-        require(_owners.length>0,"owners required");
-        require(_numConfirmationsRequired >0 && _numConfirmationsRequired<= _owners.length);
+    constructor(
+        address[] memory _owners,
+        uint256 _numConfirmationsRequired,
+        string memory _name
+    ) {
+        require(_owners.length > 0, "owners required");
+        require(keccak256(abi.encodePacked(_name)) != "", "name required");
+        require(
+            _numConfirmationsRequired > 0 &&
+                _numConfirmationsRequired <= _owners.length,
+            "numConfirmationsRequired must be greater than 0 and less than or equal to the number of owners"
+        );
 
-        for (uint i = 0; i <_owners.length; i++){
-            address owner =_owners[i];
-            require(owner != address(0),"Invalid owner");
-            require(!isOwner[owner],"owner not unique");
+        // Check to see if owners are unique
+        for (uint256 i = 0; i < _owners.length; i++) {
+            address owner = _owners[i];
+            require(owner != address(0), "Invalid owner");
+            require(!isOwner[owner], "owner not unique");
             isOwner[owner] = true;
             owners.push(owner);
         }
 
         numConfirmations = _numConfirmationsRequired;
-
+        name = _name;
     }
 
+    // Emit event when money gets deposited into the wallet
     receive() external payable {
-        emit Deposit(msg.sender, msg.value,address(this).balance);
+        emit Deposit(msg.sender, msg.value, address(this).balance);
     }
 
     // for remix testing
-    function deposit() payable external {
-        emit Deposit(msg.sender, msg.value,address(this).balance);
+    function deposit() external payable {
+        emit Deposit(msg.sender, msg.value, address(this).balance);
     }
 
-    function submitTransaction(address _to, uint _value, bytes memory _data) public onlyOwner{
-        uint txIndex = transactions.length;
-        
-        transactions.push(Transaction({
-            to:_to,
-            value:_value,
-            data:_data,
-            executed:false,
-            numConfirmations:0
-        }));
-
-        emit SubmitTransaction(msg.sender,txIndex,_to,_value,_data);
-
-
+    function getOwners() external view returns (address[] memory) {
+        return owners;
     }
 
-    function confirmTransaction(uint _txIndex) public onlyOwner txExists(_txIndex) notExecuted(_txIndex) notConfirmed(_txIndex) {
+    function getTransactions() external view returns (Transaction[] memory) {
+        return transactions;
+    }
+
+    function submitTransaction(
+        address _to,
+        uint256 _value,
+        bytes memory _data,
+        string memory _descriptionHash
+    ) public onlyOwner {
+        uint256 _txIndex = transactions.length;
+
+        // when submitting a contract, make the owner submitting the transaction confirm it too
+        Transaction memory _tx = Transaction({
+            to: _to,
+            value: _value,
+            data: _data,
+            executed: false,
+            numConfirmations: 1,
+            txIndex: _txIndex,
+            descriptionHash: _descriptionHash,
+            timestampSubmitted: block.timestamp,
+            timestampExecuted: 0
+        });
+
+        transactions.push(_tx);
+
+        isConfirmed[_txIndex][msg.sender] = true;
+
+        emit SubmitTransaction(msg.sender, _txIndex, _to, _value, _data);
+    }
+
+    function confirmTransaction(uint256 _txIndex)
+        public
+        onlyOwner
+        txExists(_txIndex)
+        notExecuted(_txIndex)
+        notConfirmed(_txIndex)
+    {
         Transaction storage transaction = transactions[_txIndex];
-        transaction.numConfirmations +=1;
-        isConfirmed[_txIndex][msg.sender]= true;
-        
+        // Increment transaction counter
+        transaction.numConfirmations += 1;
+        // Set mapping
+        isConfirmed[_txIndex][msg.sender] = true;
 
-        emit ConfirmTransaction(msg.sender,_txIndex);
-        
+        emit ConfirmTransaction(msg.sender, _txIndex);
     }
 
-    function executeTransaction(uint _txIndex) public onlyOwner txExists(_txIndex) notExecuted(_txIndex){
-
+    function executeTransaction(uint256 _txIndex)
+        public
+        onlyOwner
+        txExists(_txIndex)
+        notExecuted(_txIndex)
+    {
         Transaction storage transaction = transactions[_txIndex];
 
-        require(transaction.numConfirmations >= numConfirmations,"not enough confirmations");
+        // check if transaction has enough confirmations
+        require(
+            transaction.numConfirmations >= numConfirmations,
+            "not enough confirmations"
+        );
 
         transaction.executed = true;
+        transaction.timestampExecuted = block.timestamp;
+        // execute transaction
         (bool success, ) = transaction.to.call{value: transaction.value}(
             transaction.data
         );
+        // make sure transaction goes through
         require(success, "tx failed");
 
         emit ExecuteTransaction(msg.sender, _txIndex);
-
     }
- 
-    function revokeConfirmation(uint _txIndex) public onlyOwner txExists(_txIndex) notExecuted(_txIndex){
+
+    function revokeConfirmation(uint256 _txIndex)
+        public
+        onlyOwner
+        txExists(_txIndex)
+        notExecuted(_txIndex)
+    {
         Transaction storage transaction = transactions[_txIndex];
-        require(isConfirmed[_txIndex][msg.sender],"You have not confirmed the transaction yet");
+        // Make sure owner confirmed transaction already
+        require(
+            isConfirmed[_txIndex][msg.sender],
+            "You have not confirmed the transaction yet"
+        );
         isConfirmed[_txIndex][msg.sender] = false;
-        transaction.numConfirmations -=1;
+        transaction.numConfirmations -= 1;
 
         emit RevokeConfirmation(msg.sender, _txIndex);
-
     }
 
     modifier onlyOwner() {
-        require(isOwner[msg.sender],"not a valid owner");
+        require(isOwner[msg.sender], "not a valid owner");
         _;
     }
 
-    modifier txExists(uint _txIndex){
-        require(_txIndex<transactions.length,"tx does not exist");
+    modifier txExists(uint256 _txIndex) {
+        require(_txIndex < transactions.length, "tx does not exist");
         _;
     }
 
-    modifier notExecuted(uint _txIndex){
-        require(!transactions[_txIndex].executed,"Transactiona already executed");
+    modifier notExecuted(uint256 _txIndex) {
+        require(
+            !transactions[_txIndex].executed,
+            "Transactiona already executed"
+        );
         _;
     }
 
-    modifier notConfirmed(uint _txIndex){
+    modifier notConfirmed(uint256 _txIndex) {
         require(!isConfirmed[_txIndex][msg.sender], "tx already confirmed");
         _;
     }
-
-
 }
